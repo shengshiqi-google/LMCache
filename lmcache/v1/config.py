@@ -74,6 +74,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _parse_local_disk,
     },
+    "local_disk_workers": {
+        "type": int,
+        "default": 16,
+        "env_converter": int,
+        "description": "Number of threads for local disk I/O.",
+    },
     "max_local_disk_size": {"type": float, "default": 0.0, "env_converter": float},
     "remote_url": {
         "type": Optional[str],

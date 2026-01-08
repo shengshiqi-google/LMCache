@@ -35,7 +35,11 @@ logger = init_logger(__name__)
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
 class LocalDiskWorker:
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_workers: int = 16,
+    ) -> None:
         self.put_lock = threading.Lock()
         self.put_tasks: List[CacheEngineKey] = []
 
@@ -43,7 +47,7 @@ class LocalDiskWorker:
         self.prefetch_tasks: dict[CacheEngineKey, Future] = {}
 
         # TODO(Jiayi): make executor and its parameters configurable
-        self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
+        self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=max_workers)
         self.loop = loop
         self._closed = False
 
@@ -137,7 +141,7 @@ class LocalDiskBackend(StorageBackendInterface):
             self.use_odirect = config.extra_config.get("use_odirect", False)
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
 
-        self.disk_worker = LocalDiskWorker(loop)
+        self.disk_worker = LocalDiskWorker(loop, config.local_disk_workers)
 
         # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
         # and hide the following details away from the backend.
@@ -427,13 +431,19 @@ class LocalDiskBackend(StorageBackendInterface):
             mem_objs.append(memory_obj)
             paths.append(path)
 
-        return await self.disk_worker.submit_task(
-            "prefetch",
-            self.batched_async_load_bytes_from_disk,
-            paths=paths,
-            keys=keys,
-            memory_objs=mem_objs,
-        )
+        tasks = []
+        for path, key, mem_obj in zip(paths, keys, mem_objs, strict=False):
+            tasks.append(
+                self.disk_worker.submit_task(
+                    "prefetch",
+                    self._load_single_bytes_from_disk,
+                    path=path,
+                    key=key,
+                    memory_obj=mem_obj,
+                )
+            )
+
+        return await asyncio.gather(*tasks)
 
     async def batched_async_contains(
         self,
@@ -451,6 +461,28 @@ class LocalDiskBackend(StorageBackendInterface):
                     self.keys_in_request.append(key)
                 num_hit_counts += 1
         return num_hit_counts
+
+    def _load_single_bytes_from_disk(
+        self,
+        path: str,
+        key: CacheEngineKey,
+        memory_obj: MemoryObj,
+    ) -> MemoryObj:
+        """
+        Load bytearray from disk for a single file.
+        """
+        buffer = memory_obj.byte_array
+        self.read_file(key, buffer, path)
+
+        # TODO(Jiayi): Please recover the metadata in a more
+        # elegant way in the future.
+        cached_positions = self.dict[key].cached_positions
+        memory_obj.metadata.cached_positions = cached_positions
+
+        with self.disk_lock:
+            self.dict[key].unpin()
+
+        return memory_obj
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -490,34 +522,6 @@ class LocalDiskBackend(StorageBackendInterface):
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
 
         self.disk_worker.remove_put_task(key)
-
-    def batched_async_load_bytes_from_disk(
-        self,
-        paths: list[str],
-        keys: list[CacheEngineKey],
-        memory_objs: list[MemoryObj],
-        write_back: bool = False,
-    ) -> list[MemoryObj]:
-        """
-        Async load bytearray from disk.
-        """
-
-        logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
-        for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
-            buffer = mem_obj.byte_array
-            self.read_file(key, buffer, path)
-
-            # TODO(Jiayi): Please recover the metadata in a more
-            # elegant way in the future.
-            cached_positions = self.dict[key].cached_positions
-            mem_obj.metadata.cached_positions = cached_positions
-
-            self.disk_lock.acquire()
-            self.dict[key].unpin()
-            self.disk_lock.release()
-
-        return memory_objs
 
     def load_bytes_from_disk(
         self,
