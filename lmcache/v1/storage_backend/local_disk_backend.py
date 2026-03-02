@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
@@ -35,15 +35,16 @@ logger = init_logger(__name__)
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
 class LocalDiskWorker:
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self, loop: asyncio.AbstractEventLoop, max_workers: int = 4
+    ) -> None:
         self.put_lock = threading.Lock()
         self.put_tasks: List[CacheEngineKey] = []
 
         self.prefetch_lock = threading.Lock()
         self.prefetch_tasks: dict[CacheEngineKey, Future] = {}
 
-        # TODO(Jiayi): make executor and its parameters configurable
-        self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=4)
+        self.executor = AsyncPQThreadPoolExecutor(loop, max_workers=max_workers)
         self.loop = loop
         self._closed = False
 
@@ -137,7 +138,21 @@ class LocalDiskBackend(StorageBackendInterface):
             self.use_odirect = config.extra_config.get("use_odirect", False)
         logger.info("Using O_DIRECT for disk I/O: %s", self.use_odirect)
 
-        self.disk_worker = LocalDiskWorker(loop)
+        self.local_disk_num_workers = int(
+            config.get_extra_config_value("local_disk_num_workers", 4)
+        )
+        self.disk_worker = LocalDiskWorker(
+            loop, max_workers=self.local_disk_num_workers
+        )
+
+        # Thread pool for parallel disk reads in batched operations
+        self.read_threadpool = ThreadPoolExecutor(
+            max_workers=self.local_disk_num_workers
+        )
+        logging.info(
+            "LocalDiskBackend initialized with %d I/O workers",
+            self.local_disk_num_workers,
+        )
 
         # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
         # and hide the following details away from the backend.
@@ -536,22 +551,31 @@ class LocalDiskBackend(StorageBackendInterface):
     ) -> list[MemoryObj]:
         """
         Async load bytearray from disk.
+
+        Reads are parallelized across the read thread pool for improved
+        throughput on high-bandwidth storage devices.
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
+
+        # Submit all reads to thread pool in parallel
+        futures = []
         for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
             buffer = mem_obj.byte_array
-            self.read_file(key, buffer, path)
+            futures.append(
+                self.read_threadpool.submit(self.read_file, key, buffer, path)
+            )
+        
+        # Wait for all reads to complete
+        for future in futures:
+            future.result()
 
-            # TODO(Jiayi): Please recover the metadata in a more
-            # elegant way in the future.
+        # Post-process metadata (sequential, fast)
+        for key, mem_obj in zip(keys, memory_objs, strict=False):
             cached_positions = self.dict[key].cached_positions
             mem_obj.metadata.cached_positions = cached_positions
-
-            self.disk_lock.acquire()
-            self.dict[key].unpin()
-            self.disk_lock.release()
+            with self.disk_lock:
+                self.dict[key].unpin()
 
         return memory_objs
 
@@ -632,4 +656,5 @@ class LocalDiskBackend(StorageBackendInterface):
     def close(self) -> None:
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
+        self.read_threadpool.shutdown(wait=False)
         self.disk_worker.close()
