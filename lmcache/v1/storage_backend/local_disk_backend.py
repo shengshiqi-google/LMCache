@@ -149,7 +149,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.read_threadpool = ThreadPoolExecutor(
             max_workers=self.local_disk_num_workers
         )
-        logging.info(
+        logger.info(
             "LocalDiskBackend initialized with %d I/O workers",
             self.local_disk_num_workers,
         )
