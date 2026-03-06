@@ -125,6 +125,13 @@ class LocalDiskBackend(StorageBackendInterface):
             os.makedirs(self.path)
             logger.info(f"Created local disk cache directory: {self.path}")
 
+        # Pre-create 256 sharded subdirectories to circumvent OS directory locks
+        import hashlib
+        for i in range(256):
+            sharded_dir = os.path.join(self.path, f"{i:02x}")
+            if not os.path.exists(sharded_dir):
+                os.makedirs(sharded_dir)
+
         self.loop = loop
 
         self.use_local_cpu = config.local_cpu
@@ -190,7 +197,10 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> str:
-        return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
+        import hashlib
+        filename = key.to_string().replace("/", "-") + ".pt"
+        subdir = hashlib.md5(filename.encode()).hexdigest()[:2]
+        return os.path.join(self.path, subdir, filename)
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
@@ -399,6 +409,7 @@ class LocalDiskBackend(StorageBackendInterface):
         """
         Blocking get function.
         """
+        logger.info("get_blocking called")
         self.disk_lock.acquire()
         if key not in self.dict:
             self.disk_lock.release()
@@ -421,6 +432,58 @@ class LocalDiskBackend(StorageBackendInterface):
         )
 
         return memory_obj
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        logger.info("batched_get_blocking called")
+        read_infos: List[Optional[tuple]] = []
+        memory_objs: List[Optional[MemoryObj]] = []
+        for key in keys:
+            with self.disk_lock:
+                if key not in self.dict:
+                    read_infos.append(None)
+                    memory_objs.append(None)
+                    continue
+                
+                self.cache_policy.update_on_hit(key, self.dict)
+                disk_meta = self.dict[key]
+                path = disk_meta.path
+                dtype = disk_meta.dtype
+                shape = disk_meta.shape
+                fmt = disk_meta.fmt
+                cached_positions = disk_meta.cached_positions
+                assert dtype is not None
+                assert shape is not None
+ 
+            memory_obj = self.local_cpu_backend.allocate(shape, dtype, fmt)
+            assert memory_obj is not None, (
+                "Memory allocation failed during batched disk load."
+            )
+            read_infos.append((key, path, cached_positions))
+            memory_objs.append(memory_obj)
+        
+        futures = []
+        future_indices = []
+        for i, info in enumerate(read_infos):
+            if info is None:
+                continue
+            key, path, _ = info
+            buffer = memory_objs[i].byte_array
+            futures.append(
+                self.read_threadpool.submit(self.read_file, key, buffer, path)
+            )
+            future_indices.append(i)
+         
+        for future in futures:
+            future.result()
+
+        for i in future_indices:
+            key, _, cached_positions = read_infos[i]
+            memory_objs[i].metadata.cached_positions = cached_positions
+
+        return memory_objs
 
     async def batched_get_non_blocking(
         self,
@@ -658,3 +721,4 @@ class LocalDiskBackend(StorageBackendInterface):
             self.batched_msg_sender.close()
         self.read_threadpool.shutdown(wait=False)
         self.disk_worker.close()
+
