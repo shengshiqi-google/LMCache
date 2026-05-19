@@ -49,22 +49,26 @@ class UnsupportedMetadataVersion(Exception):
     pass
 
 
-torch_dtypes = {
-    torch.half: "F16",
-    torch.bfloat16: "BF16",
-    torch.float32: "F32",
-    torch.float64: "F64",
-    torch.uint8: "U8",
-    torch.uint16: "U16",
-    torch.uint32: "U32",
-    torch.uint64: "U64",
-    torch.int8: "I8",
-    torch.int16: "I16",
-    torch.int32: "I32",
-    torch.int64: "I64",
-    torch.float8_e4m3fn: "F8E4M3FN",
-    torch.float8_e5m2: "F8E5M2",
-}
+torch_dtypes = {}
+for attr, name in [
+    ("half", "F16"),
+    ("bfloat16", "BF16"),
+    ("float32", "F32"),
+    ("float64", "F64"),
+    ("uint8", "U8"),
+    ("uint16", "U16"),
+    ("uint32", "U32"),
+    ("uint64", "U64"),
+    ("int8", "I8"),
+    ("int16", "I16"),
+    ("int32", "I32"),
+    ("int64", "I64"),
+    ("float8_e4m3fn", "F8E4M3FN"),
+    ("float8_e5m2", "F8E5M2"),
+]:
+    if hasattr(torch, attr):
+        torch_dtypes[getattr(torch, attr)] = name
+
 
 torch_dtypes_inverse = dict([(v, k) for k, v in torch_dtypes.items()])
 
