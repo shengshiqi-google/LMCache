@@ -78,6 +78,9 @@ class GCSConnector(RemoteConnector):
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         path = self._get_object_path(key)
         
+        if not await self.exists(key):
+            return None
+
         def _download_data(memory_obj):
             buffer = memory_obj.byte_array
             with self.fs.open(path, 'rb', block_size=self.full_chunk_size_bytes) as f:
@@ -114,6 +117,7 @@ class GCSConnector(RemoteConnector):
         except Exception as e:
             logger.error(f"Failed to write to GCS path {path}: {e}")
             raise
+
 
     async def list(self) -> List[str]:
         def _list():
