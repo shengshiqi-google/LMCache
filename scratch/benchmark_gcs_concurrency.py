@@ -14,7 +14,7 @@ NUM_CHUNKS = 8  # Test with 8 chunks (512 MB total) to avoid massive bucket bloa
 dummy_data = bytearray(CHUNK_SIZE_BYTES)
 
 def cleanup_benchmark_gcs():
-    fs = gcsfs.GCSFileSystem()
+    fs = gcsfs.GCSFileSystem(consistency='none')
     try:
         files = fs.find(f"{GCS_BUCKET}/benchmark_test")
         if files:
@@ -58,7 +58,7 @@ def main():
     print(f"Data: {NUM_CHUNKS} chunks of {CHUNK_SIZE_MB} MB each = {NUM_CHUNKS * CHUNK_SIZE_MB} MB total")
     print("="*60)
     
-    fs = gcsfs.GCSFileSystem()
+    fs = gcsfs.GCSFileSystem(consistency='none')
     cleanup_benchmark_gcs()
     
     results = []
