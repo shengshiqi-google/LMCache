@@ -66,14 +66,13 @@ class GCSConnector(RemoteConnector):
         self.bucket_name = bucket_name
         
         gcsfs.GCSFileSystem.clear_instance_cache()
-        self.fs = gcsfs.GCSFileSystem()
+        self.fs = gcsfs.GCSFileSystem(consistency='none')
 
         # Resolve max_workers from extra_config with default of 4
         max_workers = 4
         if config is not None:
             max_workers = config.get_extra_config_value("gcs_max_workers", 4)
 
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gcs_connector")
         self.pq_executor = AsyncPQExecutor(loop, max_workers=max_workers)
         logger.info(f"Initialized GCSConnector with bucket name: {self.bucket_name}, max_workers: {max_workers}")
 
@@ -82,10 +81,8 @@ class GCSConnector(RemoteConnector):
         return f"{self.bucket_name}/{key_str}"
 
     async def _exists(self, key: CacheEngineKey) -> bool:
-        def _exists():
-            path = self._get_object_path(key)
-            return self.fs.exists(path)
-        return await self.loop.run_in_executor(self.executor, _exists)
+        path = self._get_object_path(key)
+        return await self.fs._exists(path)
 
     async def exists(self, key: CacheEngineKey) -> bool:
         return await self.pq_executor.submit_job(
@@ -102,12 +99,6 @@ class GCSConnector(RemoteConnector):
         if not await self._exists(key):
             return None
 
-        def _download_data(memory_obj):
-            buffer = memory_obj.byte_array
-            with self.fs.open(path, 'rb', block_size=self.full_chunk_size_bytes) as f:
-                num_read = f.readinto(buffer)
-            return num_read
-
         memory_obj = self.local_cpu_backend.allocate(
             self.meta_shapes, self.meta_dtypes, self.meta_fmt
         )
@@ -116,7 +107,10 @@ class GCSConnector(RemoteConnector):
             return None
 
         try:
-            num_read = await self.loop.run_in_executor(self.executor, _download_data, memory_obj)
+            data = await self.fs._cat_file(path)
+            num_read = len(data)
+            buffer = memory_obj.byte_array
+            buffer[:num_read] = data
             memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
             return memory_obj
         except Exception as e:
@@ -133,13 +127,8 @@ class GCSConnector(RemoteConnector):
     async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         path = self._get_object_path(key)
         buffer = memory_obj.byte_array
-
-        def _upload_data():
-            with self.fs.open(path, 'wb', block_size=self.full_chunk_size_bytes) as f:
-                f.write(buffer)
-
         try:
-            await self.loop.run_in_executor(self.executor, _upload_data)
+            await self.fs._pipe_file(path, buffer)
         except Exception as e:
             logger.error(f"Failed to write to GCS path {path}: {e}")
             raise
@@ -149,12 +138,9 @@ class GCSConnector(RemoteConnector):
             self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
         )
 
-
     async def list(self) -> List[str]:
-        def _list():
-            objects = self.fs.ls(self.bucket_name)
-            return [o.removeprefix(f"{self.bucket_name}/") for o in objects]
-        return await self.loop.run_in_executor(self.executor, _list)
+        objects = await self.fs._ls(self.bucket_name)
+        return [o.removeprefix(f"{self.bucket_name}/") for o in objects]
 
     def support_batched_contains(self) -> bool:
         return True
@@ -182,6 +168,5 @@ class GCSConnector(RemoteConnector):
 
     async def close(self):
         await self.pq_executor.shutdown_async(wait=True)
-        self.executor.shutdown(wait=False)
         logger.info("Closed the GCS connector")
 

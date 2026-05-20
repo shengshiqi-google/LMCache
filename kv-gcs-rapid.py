@@ -113,7 +113,7 @@ def run_gcs_test():
         "remote_url": f"gs://{GCS_BUCKET}",
         "remote_serde": "naive",
         "extra_config": {
-            "gcs_max_workers": 100
+            "gcs_max_workers": 128
         }
     }
     
