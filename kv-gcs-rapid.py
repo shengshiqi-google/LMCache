@@ -107,13 +107,13 @@ def run_gcs_test():
     # Config using Native GCS connector
     config = {
         "chunk_size": 256,
-        "local_cpu": True,
+        "local_cpu": False,
         "max_local_cpu_size": MAX_CPU_BUFFER_GB,
         "local_disk": None,
         "remote_url": f"gs://{GCS_BUCKET}",
         "remote_serde": "naive",
         "extra_config": {
-            "gcs_max_workers": 16
+            "gcs_max_workers": 128
         }
     }
     
@@ -124,7 +124,7 @@ def run_gcs_test():
     
     # GCS doesn't use O_DIRECT (POSIX only)
     extra_config = {
-        "gcs_max_workers": 16
+        "gcs_max_workers": 128
     }
     os.environ["LMCACHE_EXTRA_CONFIG"] = json.dumps(extra_config)
     
