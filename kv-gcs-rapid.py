@@ -83,27 +83,21 @@ def cleanup_storage():
     print(f"[CLEANUP] Wiping prefix 'Qwen' from GCS Rapid bucket...")
     print("="*40)
     import subprocess
-    for tool in ["gcloud storage", "gsutil"]:
-        try:
-            if tool == "gcloud storage":
-                cmd = f"gcloud storage rm --recursive gs://{GCS_BUCKET}/Qwen"
-            else:
-                cmd = f"gsutil -m rm -r gs://{GCS_BUCKET}/Qwen"
-            
-            res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res.returncode == 0:
-                print(f"   [CLEANUP] Successfully wiped gs://{GCS_BUCKET}/Qwen via {tool}")
-                return
-            else:
-                # If the prefix doesn't exist, that's a successful clean state
-                err_lower = res.stderr.lower()
-                if any(msg in err_lower for msg in ["not found", "matched no", "does not exist", "no URLs matched"]):
-                    print(f"   [CLEANUP] Prefix 'Qwen' does not exist (bucket already clean).")
-                    return
-        except Exception:
-            pass
-    
-    print("   [CLEANUP] Warning: Failed to run cleanup or find objects to clean.")
+    import sys
+    try:
+        # Run a separate Python subprocess using the exact same python executable to avoid gRPC pollution in the parent process
+        cmd = [
+            sys.executable,
+            "-c",
+            f"import gcsfs; fs = gcsfs.GCSFileSystem(); files = fs.find('{GCS_BUCKET}/Qwen'); fs.rm(files) if files else None"
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            print(f"   [CLEANUP] Successfully wiped files under gs://{GCS_BUCKET}/Qwen via gcsfs")
+        else:
+            print(f"   [CLEANUP] Warning: {res.stderr.strip()}")
+    except Exception as e:
+        print(f"   [CLEANUP] Warning: Failed to run cleanup: {e}")
 
 
 # --- MAIN SCRIPT ---
