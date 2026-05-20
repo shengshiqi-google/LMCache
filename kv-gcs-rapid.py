@@ -117,7 +117,10 @@ def run_gcs_test():
         "max_local_cpu_size": MAX_CPU_BUFFER_GB,
         "local_disk": None,
         "remote_url": f"gs://{GCS_BUCKET}",
-        "remote_serde": "naive"
+        "remote_serde": "naive",
+        "extra_config": {
+            "gcs_max_workers": 100
+        }
     }
     
     with open(CONFIG_FILE, "w") as f:

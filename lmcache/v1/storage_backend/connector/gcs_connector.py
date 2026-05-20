@@ -67,9 +67,15 @@ class GCSConnector(RemoteConnector):
         
         gcsfs.GCSFileSystem.clear_instance_cache()
         self.fs = gcsfs.GCSFileSystem()
-        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gcs_connector")
-        self.pq_executor = AsyncPQExecutor(loop)
-        logger.info(f"Initialized GCSConnector with bucket name: {self.bucket_name}")
+
+        # Resolve max_workers from extra_config with default of 4
+        max_workers = 4
+        if config is not None:
+            max_workers = config.get_extra_config_value("gcs_max_workers", 4)
+
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gcs_connector")
+        self.pq_executor = AsyncPQExecutor(loop, max_workers=max_workers)
+        logger.info(f"Initialized GCSConnector with bucket name: {self.bucket_name}, max_workers: {max_workers}")
 
     def _get_object_path(self, key: CacheEngineKey) -> str:
         key_str = key.to_string()
