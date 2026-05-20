@@ -20,14 +20,20 @@ MAX_MODEL_LEN = 32769
 PROMPT_LEN = 32768
 
 # --- GCSFS UTILS ---
-fs = gcsfs.GCSFileSystem()
+fs = None
+
+def get_fs():
+    global fs
+    if fs is None:
+        fs = gcsfs.GCSFileSystem()
+    return fs
 
 def get_gcs_size_mb():
     total_size = 0
     file_count = 0
     try:
         # Query only the Qwen subfolder to avoid scanning the entire bucket
-        res = fs.find(f"{GCS_BUCKET}/Qwen", detail=True)
+        res = get_fs().find(f"{GCS_BUCKET}/Qwen", detail=True)
         for f in res.values():
             total_size += f.get('size', 0)
             file_count += 1
@@ -76,11 +82,11 @@ def cleanup_storage():
     print("\n" + "="*40)
     print(f"[CLEANUP] Wiping Native GCS Rapid bucket objects...")
     print("="*40)
+    import subprocess
     try:
-        files = fs.ls(GCS_BUCKET)
-        for f in files:
-            fs.rm(f, recursive=True)
-            print(f"   [CLEANUP] Deleted {f} recursively")
+        # Clean up using gsutil in a separate subprocess to avoid importing/initializing gRPC in Python parent process before vLLM forks
+        subprocess.run(f"gsutil -q -m rm -rf gs://{GCS_BUCKET}/*", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"   [CLEANUP] Successfully wiped gs://{GCS_BUCKET} via gsutil")
     except Exception as e:
         print(f"   [CLEANUP] Warning: {e}")
 
