@@ -125,7 +125,7 @@ class GCSConnector(RemoteConnector):
         try:
             data = await self.fs._cat_file(path)
             num_read = len(data)
-            buffer = memory_obj.byte_array
+            buffer = memory_obj.byte_array.cast("B")
             buffer[:num_read] = data
             memory_obj = self.reshape_partial_chunk(memory_obj, num_read)
             return memory_obj
