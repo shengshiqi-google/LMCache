@@ -123,7 +123,9 @@ def run_gcs_test():
     os.environ["LMCACHE_CONFIG_FILE"] = os.path.abspath(CONFIG_FILE)
     
     # GCS doesn't use O_DIRECT (POSIX only)
-    extra_config = {}
+    extra_config = {
+        "gcs_max_workers": 128
+    }
     os.environ["LMCACHE_EXTRA_CONFIG"] = json.dumps(extra_config)
     
     print(f"LMCache configuration written to {os.path.abspath(CONFIG_FILE)}")
