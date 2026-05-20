@@ -520,9 +520,6 @@ class TensorMemoryObj(MemoryObj):
             self.parent_allocator.free(self)
 
     def invalidate(self):
-        import traceback
-        logger.warning(f"Invalidating MemoryObj at address {self.meta.address}, phy_size {self.meta.phy_size}. Stack trace:")
-        traceback.print_stack()
         self.valid = False
 
     def is_valid(self):
@@ -636,9 +633,7 @@ class TensorMemoryObj(MemoryObj):
     @property
     def tensor(self) -> Optional[torch.Tensor]:
         if not self.valid:
-            import traceback
-            logger.warning(f"Trying to access an invalidated MemoryObj at address {self.meta.address}, phy_size {self.meta.phy_size}. Stack trace:")
-            traceback.print_stack()
+            logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.meta.dtype is not None
         # TODO(Jiayi): consider caching the `get_size()`

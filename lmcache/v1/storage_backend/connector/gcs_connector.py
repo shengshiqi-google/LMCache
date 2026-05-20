@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List, Optional
+from enum import IntEnum, auto
 import asyncio
 import gcsfs
 from concurrent.futures import ThreadPoolExecutor
@@ -12,8 +13,16 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.storage_backend.job_executor.pq_executor import AsyncPQExecutor
 
 logger = init_logger(__name__)
+
+class Priorities(IntEnum):
+    PEEK = auto()
+    PREFETCH = auto()
+    GET = auto()
+    PUT = auto()
+
 
 class GCSConnector(RemoteConnector):
     """
@@ -59,26 +68,32 @@ class GCSConnector(RemoteConnector):
         gcsfs.GCSFileSystem.clear_instance_cache()
         self.fs = gcsfs.GCSFileSystem()
         self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gcs_connector")
+        self.pq_executor = AsyncPQExecutor(loop)
         logger.info(f"Initialized GCSConnector with bucket name: {self.bucket_name}")
 
     def _get_object_path(self, key: CacheEngineKey) -> str:
         key_str = key.to_string()
         return f"{self.bucket_name}/{key_str}"
 
-    async def exists(self, key: CacheEngineKey) -> bool:
+    async def _exists(self, key: CacheEngineKey) -> bool:
         def _exists():
             path = self._get_object_path(key)
             return self.fs.exists(path)
         return await self.loop.run_in_executor(self.executor, _exists)
 
+    async def exists(self, key: CacheEngineKey) -> bool:
+        return await self.pq_executor.submit_job(
+            self._exists, key=key, priority=Priorities.PEEK
+        )
+
     def exists_sync(self, key: CacheEngineKey) -> bool:
         path = self._get_object_path(key)
         return self.fs.exists(path)
 
-    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+    async def _get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         path = self._get_object_path(key)
         
-        if not await self.exists(key):
+        if not await self._exists(key):
             return None
 
         def _download_data(memory_obj):
@@ -104,7 +119,12 @@ class GCSConnector(RemoteConnector):
                 memory_obj.ref_count_down()
             return None
 
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        return await self.pq_executor.submit_job(
+            self._get, key=key, priority=Priorities.GET
+        )
+
+    async def _put(self, key: CacheEngineKey, memory_obj: MemoryObj):
         path = self._get_object_path(key)
         buffer = memory_obj.byte_array
 
@@ -117,6 +137,11 @@ class GCSConnector(RemoteConnector):
         except Exception as e:
             logger.error(f"Failed to write to GCS path {path}: {e}")
             raise
+
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+        await self.pq_executor.submit_job(
+            self._put, key=key, memory_obj=memory_obj, priority=Priorities.PUT
+        )
 
 
     async def list(self) -> List[str]:
@@ -150,6 +175,7 @@ class GCSConnector(RemoteConnector):
         return hit_chunks
 
     async def close(self):
+        await self.pq_executor.shutdown_async(wait=True)
         self.executor.shutdown(wait=False)
         logger.info("Closed the GCS connector")
 
