@@ -113,7 +113,7 @@ def run_gcs_test():
         "remote_url": f"gs://{GCS_BUCKET}",
         "remote_serde": "naive",
         "extra_config": {
-            "gcs_max_workers": 128
+            "gcs_max_workers": 16
         }
     }
     
@@ -124,7 +124,7 @@ def run_gcs_test():
     
     # GCS doesn't use O_DIRECT (POSIX only)
     extra_config = {
-        "gcs_max_workers": 128
+        "gcs_max_workers": 16
     }
     os.environ["LMCACHE_EXTRA_CONFIG"] = json.dumps(extra_config)
     
