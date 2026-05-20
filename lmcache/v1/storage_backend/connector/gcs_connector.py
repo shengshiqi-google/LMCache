@@ -65,8 +65,8 @@ class GCSConnector(RemoteConnector):
 
         self.bucket_name = bucket_name
         
-        gcsfs.GCSFileSystem.clear_instance_cache()
-        self.fs = gcsfs.GCSFileSystem(consistency='none')
+        self._sync_fs = gcsfs.GCSFileSystem(consistency='none')
+        self._loop_to_fs = {}
 
         # Resolve max_workers from extra_config with default of 4
         max_workers = 4
@@ -75,6 +75,22 @@ class GCSConnector(RemoteConnector):
 
         self.pq_executor = AsyncPQExecutor(loop, max_workers=max_workers)
         logger.info(f"Initialized GCSConnector with bucket name: {self.bucket_name}, max_workers: {max_workers}")
+
+    @property
+    def fs(self) -> gcsfs.GCSFileSystem:
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return self._sync_fs
+
+        if current_loop not in self._loop_to_fs:
+            gcsfs.GCSFileSystem.clear_instance_cache()
+            self._loop_to_fs[current_loop] = gcsfs.GCSFileSystem(
+                asynchronous=True,
+                loop=current_loop,
+                consistency='none'
+            )
+        return self._loop_to_fs[current_loop]
 
     def _get_object_path(self, key: CacheEngineKey) -> str:
         key_str = key.to_string()
