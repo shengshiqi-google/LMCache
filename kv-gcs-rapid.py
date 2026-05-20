@@ -80,15 +80,30 @@ def wait_for_gcs_stable(check_interval=2, stable_checks=3):
 
 def cleanup_storage():
     print("\n" + "="*40)
-    print(f"[CLEANUP] Wiping Native GCS Rapid bucket objects...")
+    print(f"[CLEANUP] Wiping prefix 'Qwen' from GCS Rapid bucket...")
     print("="*40)
     import subprocess
-    try:
-        # Clean up using gsutil in a separate subprocess to avoid importing/initializing gRPC in Python parent process before vLLM forks
-        subprocess.run(f"gsutil -q -m rm -rf gs://{GCS_BUCKET}/*", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"   [CLEANUP] Successfully wiped gs://{GCS_BUCKET} via gsutil")
-    except Exception as e:
-        print(f"   [CLEANUP] Warning: {e}")
+    for tool in ["gcloud storage", "gsutil"]:
+        try:
+            if tool == "gcloud storage":
+                cmd = f"gcloud storage rm --recursive gs://{GCS_BUCKET}/Qwen"
+            else:
+                cmd = f"gsutil -m rm -r gs://{GCS_BUCKET}/Qwen"
+            
+            res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode == 0:
+                print(f"   [CLEANUP] Successfully wiped gs://{GCS_BUCKET}/Qwen via {tool}")
+                return
+            else:
+                # If the prefix doesn't exist, that's a successful clean state
+                err_lower = res.stderr.lower()
+                if any(msg in err_lower for msg in ["not found", "matched no", "does not exist", "no URLs matched"]):
+                    print(f"   [CLEANUP] Prefix 'Qwen' does not exist (bucket already clean).")
+                    return
+        except Exception:
+            pass
+    
+    print("   [CLEANUP] Warning: Failed to run cleanup or find objects to clean.")
 
 
 # --- MAIN SCRIPT ---
