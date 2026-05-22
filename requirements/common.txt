@@ -41,4 +41,4 @@ torch
 transformers >= 5.4
 uvicorn
 httptools
-gcsfs
+google-cloud-storage

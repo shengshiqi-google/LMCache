@@ -11,6 +11,7 @@ GCS_BUCKET = "shiqi-rapid-west4-agent"
 CONFIG_FILE = "lmcache_gcs_config.yaml"
 
 # --- CACHE CONFIG ---
+# Target L1 DRAM buffer size (12.0 GB) purposefully kept small to force cache eviction and GCS reads on subsequent hits
 MAX_CPU_BUFFER_GB = 12.0
 
 # --- MODEL CONFIG ---
@@ -32,21 +33,19 @@ def get_gcs_size_mb():
     total_size = 0
     file_count = 0
     try:
-        # Query only the Qwen subfolder to avoid scanning the entire bucket
-        res = get_fs().find(f"{GCS_BUCKET}/Qwen", detail=True)
-        for f in res.values():
-            total_size += f.get('size', 0)
-            file_count += 1
-    except FileNotFoundError:
-        # Subfolder does not exist yet, which is normal before first write
-        pass
+        # Scan entire bucket root, matching both Qwen/ directory and flat Qwen_ prefixes
+        res = get_fs().find(GCS_BUCKET, detail=True)
+        for f_name, f in res.items():
+            if "Qwen" in f_name:
+                total_size += f.get('size', 0)
+                file_count += 1
     except Exception as e:
         print(f"   [GCS MONITOR] Error: {e}")
     return total_size / (1024 * 1024), file_count
 
 def wait_for_gcs_stable(check_interval=2, stable_checks=3):
     print(f"\n[GCS MONITOR] Monitoring Native GCS Rapid bucket: {GCS_BUCKET}")
-    
+
     last_size = -1
     stable_count = 0
     start_time = time.time()
@@ -89,11 +88,11 @@ def cleanup_storage():
         cmd = [
             sys.executable,
             "-c",
-            f"import gcsfs; fs = gcsfs.GCSFileSystem(); files = fs.find('{GCS_BUCKET}/Qwen'); fs.rm(files) if files else None"
+            f"import gcsfs; fs = gcsfs.GCSFileSystem(); files = [f for f in fs.find('{GCS_BUCKET}') if 'Qwen' in f]; fs.rm(files) if files else None"
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if res.returncode == 0:
-            print(f"   [CLEANUP] Successfully wiped files under gs://{GCS_BUCKET}/Qwen via gcsfs")
+            print(f"   [CLEANUP] Successfully wiped files matching 'Qwen' under gs://{GCS_BUCKET} via gcsfs")
         else:
             print(f"   [CLEANUP] Warning: {res.stderr.strip()}")
     except Exception as e:
@@ -113,27 +112,27 @@ def run_gcs_test():
         "remote_url": f"gs://{GCS_BUCKET}",
         "remote_serde": "naive",
         "extra_config": {
-            "gcs_max_workers": 128
+            "gcs_max_workers": 32
         }
     }
-    
+
     with open(CONFIG_FILE, "w") as f:
         yaml.dump(config, f)
 
     os.environ["LMCACHE_CONFIG_FILE"] = os.path.abspath(CONFIG_FILE)
-    
+
     # GCS doesn't use O_DIRECT (POSIX only)
     extra_config = {
-        "gcs_max_workers": 128
+        "gcs_max_workers": 4
     }
     os.environ["LMCACHE_EXTRA_CONFIG"] = json.dumps(extra_config)
-    
+
     print(f"LMCache configuration written to {os.path.abspath(CONFIG_FILE)}")
 
     # Init Engine
     print(f"Initializing vLLM with LMCache (Native GCS Rapid Backend)...")
     kv_config = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
-    
+
     llm = LLM(
         model=MODEL_PATH,
         gpu_memory_utilization=GPU_UTILIZATION,
@@ -172,7 +171,7 @@ def run_gcs_test():
     llm.generate(prompts=[{"prompt_token_ids": prompt_A}], sampling_params=params)
     dur_1 = time.perf_counter() - start
     print(f"-> Duration: {dur_1:.2f} s")
-    
+
     wait_for_gcs_stable()
 
     # ---------------------------------------------------------
@@ -184,7 +183,7 @@ def run_gcs_test():
     llm.generate(prompts=[{"prompt_token_ids": prompt_B}], sampling_params=params)
     dur_2 = time.perf_counter() - start
     print(f"-> Duration: {dur_2:.2f} s")
-    
+
     wait_for_gcs_stable()
 
     # ---------------------------------------------------------
