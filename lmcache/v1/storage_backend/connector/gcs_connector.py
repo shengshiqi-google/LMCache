@@ -3,6 +3,7 @@
 from typing import List, Optional
 from urllib.parse import urlparse
 import asyncio
+import os
 
 # Third Party
 from google.cloud import storage as gcs_sync
@@ -142,6 +143,29 @@ class GcsConnector(RemoteConnector):
         bucket = client.bucket(self.bucket_name)
         blob = bucket.blob(self._object_name(key))
         return blob.exists()
+    
+    def support_batched_contains(self) -> bool:
+        return True
+
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        if not keys:
+            return 0
+        client = self._ensure_sync_client()
+        names = [self._object_name(k) for k in keys]
+        common_prefix = os.path.commonprefix(names)
+        found = {
+            blob.name
+            for blob in client.list_blobs(
+                self.bucket_name, prefix = common_prefix
+            )
+        }
+        count = 0
+        for name in names:
+            if name not in found:
+                break
+            count += 1
+        return count
+    
     
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         grpc_client = await self._ensure_async_client()

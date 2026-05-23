@@ -16,9 +16,9 @@ MAX_CPU_BUFFER_GB = 12.0
 
 # --- MODEL CONFIG ---
 MODEL_PATH = "Qwen/Qwen3-32B"
-GPU_UTILIZATION = 0.95
-MAX_MODEL_LEN = 32769
-PROMPT_LEN = 32768
+GPU_UTILIZATION = 0.94
+MAX_MODEL_LEN = 40960
+PROMPT_LEN = 40959
 
 # --- GCSFS UTILS ---
 fs = None
@@ -111,9 +111,6 @@ def run_gcs_test():
         "local_disk": None,
         "remote_url": f"gs://{GCS_BUCKET}",
         "remote_serde": "naive",
-        "extra_config": {
-            "gcs_max_workers": 32
-        }
     }
 
     with open(CONFIG_FILE, "w") as f:
