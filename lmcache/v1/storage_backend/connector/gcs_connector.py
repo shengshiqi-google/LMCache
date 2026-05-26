@@ -6,11 +6,11 @@ import asyncio
 import os
 
 # Third Party
-from google.cloud import storage as gcs_sync
 from google.cloud.storage.asyncio.async_grpc_client import AsyncGrpcClient
 from google.cloud.storage.asyncio.async_appendable_object_writer import AsyncAppendableObjectWriter
 from google.cloud.storage.asyncio.async_multi_range_downloader import AsyncMultiRangeDownloader
-import grpc
+from google.api_core import exceptions
+from google.cloud import _storage_v2 as storage_v2
 
 # First Party
 from lmcache.logging import init_logger
@@ -49,7 +49,6 @@ class MemoryViewSink:
         self.buffer: memoryview = memoryview(buffer).cast("B")
         self.offset: int = 0
 
-    
     def writable(self) -> bool:
         """
         Indiate that the sink is writable.
@@ -127,10 +126,7 @@ class GcsConnector(RemoteConnector):
 
     Reads use `AsyncMultiRangeDownloader` and writes use
     `AsyncAppendableObjectWriter` (with `finalize()`), both from
-    `google.cloud.storage.asyncio`. A separate sync
-    `google.cloud.storage.Client` is used for metadata operations
-    (`exists` / `exists_sync`), since the asyncio async helpers
-    cover only object-data read/write.
+    `google.cloud.storage.asyncio`. 
 
     Authentication uses Application Default Credentials on the host VM.
 
@@ -190,7 +186,6 @@ class GcsConnector(RemoteConnector):
         # before the caller's loop is live would bind it to the wrong
         # (or dead) loop.
         self._grpc_client: Optional[AsyncGrpcClient] = None
-        self._sync_client: Optional[gcs_sync.Client] = None
         self._init_lock: Optional[asyncio.Lock] = None
         self._bound_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -229,27 +224,9 @@ class GcsConnector(RemoteConnector):
                 )
             elif self._bound_loop is not current_loop:
                 raise RuntimeError(
-                    "GCSConnector AsyncGrpcClient is bound to a different "
+                    "GCSConnector AsyncGrpcClient is bound to a different event loop."
                 )
         return self._grpc_client
-    
-    def _ensure_sync_client(self) -> "gcs_sync.Client":
-        """
-        Lazy-initialize the sync `google.cloud.storage.Client`.
-
-        Used for metadata operations (`exists` / `exists_sync`).
-        Constructed with the default credentials chain (ADC).
-
-        Returns:
-            The lazily-initialized sync Client.
-        """
-        if self._sync_client is None:
-            self._sync_client = gcs_sync.Client()
-            logger.info(
-                "Initialized sync storage.Client for bucket=%s",
-                self.bucket_name,
-            )
-        return self._sync_client
     
     def _object_name(self, key: CacheEngineKey) -> str:
         """
@@ -271,18 +248,21 @@ class GcsConnector(RemoteConnector):
         """
         Asynchronously check whether a key exists in the remove bucket.
 
-        Delegates to the sync client via `run_in_executor`; gRPC's
-        C-core releases the GIL during the wire call.
-
         Args:
             key: The cache engine key.
         
         Returns:
             True if the object exists, False otherwise.
         """
-        return await asyncio.get_running_loop().run_in_executor(
-            None, self.exists_sync, key
-        )
+        grpc_client = await self._ensure_async_client()
+        try:
+            await grpc_client.get_object(
+                bucket_name=self.bucket_name, 
+                object_name=self._object_name(key)
+            )
+            return True
+        except exceptions.NotFound:
+            return False
     
     def exists_sync(self, key: CacheEngineKey) -> bool:
         """
@@ -294,33 +274,43 @@ class GcsConnector(RemoteConnector):
         Returns:
             True if the object exists, False otherwise.
         """
-        client = self._ensure_sync_client()
-        bucket = client.bucket(self.bucket_name)
-        blob = bucket.blob(self._object_name(key))
-        return blob.exists()
+        # Execute the async method synchronously on the bound event loop
+        future = asyncio.run_coroutine_threadsafe(self.exists(key), self.loop)
+        return future.result()
     
     def support_batched_contains(self) -> bool:
         return True
 
-    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+    async def _batched_contains_async(self, keys: List[CacheEngineKey]) -> int:
+        """Async implementation of batched_contains utilizing gRPC."""
         if not keys:
             return 0
-        client = self._ensure_sync_client()
+        
+        grpc_client = await self._ensure_async_client()
         names = [self._object_name(k) for k in keys]
         common_prefix = os.path.commonprefix(names)
-        found = {
-            blob.name
-            for blob in client.list_blobs(
-                self.bucket_name, prefix = common_prefix
-            )
-        }
+        
+        # gRPC requires the full bucket path format
+        parent = f"projects/_/buckets/{self.bucket_name}"
+        request = storage_v2.ListObjectsRequest(parent=parent, prefix=common_prefix)
+        
+        pager = await grpc_client.grpc_client.list_objects(request=request)
+        found = {obj.name async for obj in pager}
+        
         count = 0
         for name in names:
             if name not in found:
                 break
             count += 1
         return count
-    
+
+    def batched_contains(self, keys: List[CacheEngineKey]) -> int:
+        if not keys:
+            return 0
+        future = asyncio.run_coroutine_threadsafe(
+            self._batched_contains_async(keys), self.loop
+        )
+        return future.result()
     
     async def get(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         """
@@ -338,9 +328,6 @@ class GcsConnector(RemoteConnector):
         Returns:
             A populated `MemoryObj` on success, or `None` on miss or
             size mismatch.
-        
-        Raises:
-            grpc.RpcError: On any gRPC failure other than NOT_FOUND.
         """
         grpc_client = await self._ensure_async_client()
         object_name = self._object_name(key)
@@ -364,10 +351,8 @@ class GcsConnector(RemoteConnector):
         try:
             try:
                 await mrd.open()
-            except grpc.RpcError as e:
-                if _is_not_found(e):
-                    return None
-                raise
+            except exceptions.NotFound:
+                return None
             
             try:
                 await mrd.download_ranges([(0, expected_size, sink)])
@@ -395,9 +380,9 @@ class GcsConnector(RemoteConnector):
             success = True
             return memory_obj
         
-        except grpc.RpcError as e:
-            if _is_not_found(e):
-                return None
+        except exceptions.NotFound:
+            return None
+        except Exception as e:
             logger.error(
                 "GCS download failed for %s: %s", object_name, e
             )
@@ -422,10 +407,6 @@ class GcsConnector(RemoteConnector):
             key: The cache engine key.
             memory_obj: The data to upload. Its `byte_array` is read
                 directly via `memoryview` (no copy).
-        
-        Raises:
-            grpc.RpcError: On any gRPC failure other than
-                ALREADY_EXISTS / FAILED_PRECONDITION.
         """
         grpc_client = await self._ensure_async_client()
         object_name = self._object_name(key)
@@ -443,19 +424,17 @@ class GcsConnector(RemoteConnector):
             try:
                 await writer.open()
                 opened = True
-            except grpc.RpcError as e:
-                if _is_already_exists(e):
-                    logger.debug(
-                        "GCS object %s already exists; skipping put.",
-                        object_name,
-                    )
-                    return
-                raise
+            except (exceptions.AlreadyExists, exceptions.FailedPrecondition):
+                logger.debug(
+                    "GCS object %s already exists; skipping put.",
+                    object_name,
+                )
+                return
             
             await writer.append(memoryview(memory_obj.byte_array))
             await writer.finalize()
             finalized = True
-        except grpc.RpcError as e:
+        except Exception as e:
             logger.error(
                 "GCS upload failed for %s: %s", object_name, e
             )
@@ -500,57 +479,3 @@ class GcsConnector(RemoteConnector):
                     "Error closing AsyncGrpcClient: %s", e
                 )
             self._grpc_client = None
-        
-        if self._sync_client is not None:
-            try:
-                self._sync_client.close()
-            except Exception as e:
-                logger.warning(
-                    "Error closing sync storage.Client: %s", e
-                )
-            self._sync_client = None
-        
-def _is_not_found(error: grpc.RpcError) -> bool:
-    """
-    Check whether a gRPC error indicates NOT_FOUND.
-
-    Args:
-        error: A gRPC error raised by an async client call.
-
-    Returns:
-        True if the error's status code is `grpc.StatusCode.NOT_FOUND`.
-    """
-    code = getattr(error, "code", None)
-    if callable(code):
-        try:
-            return code() == grpc.StatusCode.NOT_FOUND
-        except Exception:
-            return False
-    return code == grpc.StatusCode.NOT_FOUND
-
-def _is_already_exists(error: grpc.RpcError) -> bool:
-    """
-    Check whether a gRPC error indicates the target object already exists.
-
-    With ``generation=0`` preconditions, an existing-object collision
-    surfaces as either ALREADY_EXISTS or FAILED_PRECONDITION depending
-    on the server.
-
-    Args:
-        error: A gRPC error raised by an async client call.
-    
-    Returns:
-        True if the error indicates an existing-object collision.
-    """
-    code = getattr(error, "code", None)
-    if callable(code):
-        try:
-            actual = code()
-        except Exception:
-            return False
-    else:
-        actual = code
-    return actual in (
-        grpc.StatusCode.ALREADY_EXISTS,
-        grpc.StatusCode.FAILED_PRECONDITION,
-    )
