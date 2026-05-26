@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 class GcsConnectorAdapter(ConnectorAdapter):
     """
     Adapter that registers the ``gs://`` URL scheme to construct a 
-    `GcsConnector`
+    `GcsConnector`.
 
     Auto-discovered by `ConnectorManager` because this module is named
     ``*_adapter.py`` and this class ubsclasses `ConnectorAdapter`.
@@ -27,6 +27,21 @@ class GcsConnectorAdapter(ConnectorAdapter):
         super().__init__(schema="gs://")
 
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """
+        Construct a `GcsConnector` from a `ConnectorContext`.
+
+        Args:
+            context: The connector context. Must carry a non-None
+            `config` and `metadata`; both are required by the
+            `RemoteConnector` base class.
+        
+        Returns:
+            A configured `GcsConnector`.
+        
+        Raises:
+            ValueError: If `context.config` or `context.metadata` is
+                None.
+        """
         if context.config is None:
             raise ValueError(
                 "GcsConnector requires a non-None config"
